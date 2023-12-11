@@ -139,8 +139,10 @@ ggplot(df, aes(x = language)) +
   theme_minimal() +
   theme(axis.text.x = element_text(angle = 90, vjust = 0.5))
 
+#df_new <- numerical_df %>%
+  #bind_cols(df %>% select(mature, language))
 df_new <- numerical_df %>%
-  bind_cols(df %>% select(mature, language))
+  bind_cols(df %>% dplyr::select(mature, language))
 
 #then we get the cleaned dataset
 write.csv(df_new, file = "/Users/rosie/Desktop/twitch1.csv", row.names = FALSE)
