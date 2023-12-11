@@ -1,0 +1,548 @@
+---
+title: "DS5230FinalProject"
+author: "Ruonan Ji, Rosie Guo"
+date: "2023-12-04"
+output: pdf_document
+---
+
+```{r}
+library(mclust)
+library(readr)
+library(tidyverse)
+library(dplyr)
+library(dbscan)
+library(corrplot)
+library(ggplot2)
+library(robust)
+library(FactoMineR)
+library(factoextra)
+library(MASS)
+library(arules)
+```
+
+```{r}
+#make sure the formate of the variable names are the same
+#This data set is from Kaggle: https://www.kaggle.com/datasets/aayushmishra1512/twitchdata
+df <- read_csv("C:/Users/ruona/OneDrive/Desktop/twitchdata-update.csv")
+names(df) <- gsub(" ", "_", names(df))
+names(df) <- tolower(names(df))
+names(df)[names(df) == "stream_time(minutes)"] <- "stream_time"
+names(df)[names(df) == "watch_time(minutes)"] <- "watch_time"
+
+# there is no no missing values
+missing_values <- is.na(df)
+missing_values_summary <- apply(missing_values, 2, sum)
+print(missing_values_summary)
+summary(df)
+
+# miss type: followers_gained has 3 negative rows
+negative_followers_gained <- subset(df, followers_gained < 0)
+
+# correct the typo
+df$followers_gained <- abs(df$followers_gained)
+summary(df)
+
+# data transformation
+# watch time#########################
+df$watch_time = (df$watch_time)^(1/10)
+
+# stream time#########################
+df$stream_time = (df$stream_time)^(1/3)
+
+# peak viewers#########################
+df$peak_viewers = (df$peak_viewers)^(1/15)
+
+# average viewers#########################
+df$average_viewers = (df$average_viewers)^(1/15)
+
+# followers#########################
+df$followers = (df$followers)^(1/4)
+
+# followers gained#########################
+hist(df$followers_gained)
+
+df$followers_gained = (df$followers_gained)^(1/4)
+
+hist(df$followers_gained, main = "The Fourth Root Transformed Data", xlab = "The Fourth  Root of followers_gained")
+
+# views gained#########################
+df$views_gained = (df$views_gained)^(1/10)
+
+# handling outliers: robust scaling
+for(col in names(df)) {
+  if(is.numeric(df[[col]])) {
+    col_median <- median(df[[col]], na.rm = TRUE)
+    col_iqr <- IQR(df[[col]], na.rm = TRUE)
+    df[[col]] <- (df[[col]] - col_median) / col_iqr
+  }
+}
+
+# extract numerical variables
+numerical_columns <- sapply(df, is.numeric)
+numerical_df <- df[, numerical_columns]
+
+par(mar=c(5.1, 4.1, 4.1, 2.1))
+for (col in colnames(numerical_df)) {
+    boxplot(numerical_df[[col]], main=col)
+}
+
+```
+
+```{r}
+# make the correlation map
+cor_matrix <- cor(numerical_df, use = "complete.obs")
+corrplot(cor_matrix, method = "color", type = "upper", order = "hclust", 
+         tl.col = "black", tl.srt = 45)
+
+# perform PCA
+pca_result <- prcomp(numerical_df, scale = TRUE)
+
+# summary of PCA
+summary(pca_result)
+
+# Visualize PCA
+fviz_pca_biplot(pca_result, repel = TRUE)
+
+pc1 <- pca_result$rotation[, 1]
+
+# print PC1
+print(pc1)
+
+fviz_eig(pca_result)
+```
+
+```{r}
+#drop the variable that are not useful
+# drop partnered column
+ggplot(df, aes(x = partnered)) +
+  geom_bar(fill = "blue") +
+  labs(title = "Distribution of Partnered",
+       x = "Partnered",
+       y = "Frequency") +
+  theme_minimal()
+table(df$partnered)
+
+# keep mature column
+ggplot(df, aes(x = mature)) +
+  geom_bar(fill = "blue") +
+  labs(title = "Distribution of Mature",
+       x = "Mature",
+       y = "Frequency") +
+  theme_minimal()
+
+# keep language column
+ggplot(df, aes(x = language)) +
+  geom_bar(fill = "blue") +
+  labs(title = "Distribution of Language",
+       x = "Language",
+       y = "Frequency") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5))
+
+df_new <- numerical_df %>%
+  bind_cols(df %>% select(mature, language))
+
+#then we get the cleaned dataset
+write.csv(df_new, file = "/Users/rosie/Desktop/twitch1.csv", row.names = FALSE)
+```
+
+```{r}
+#streamer data is our new dataset that haven been cleaned
+streamer_data <- df_new
+streamer_data
+```
+
+```{r}
+### apply k-means
+#streamer_data <- read_csv("/Users/rosie/Desktop/twitch1.csv")
+
+selected_data <- streamer_data %>%
+  dplyr::select(watch_time, average_viewers, followers_gained, views_gained)
+
+# scale the data 
+scaled_data <- scale(selected_data)
+
+# get the optimal number of clusters using the elbow method
+set.seed(123) 
+wss <- map_dbl(1:10, function(k) {
+  kmeans(scaled_data, centers = k, nstart = 10)$tot.withinss
+})
+
+# plot the elbow method
+elbow_plot <- tibble(k = 1:10, wss = wss) %>%
+  ggplot(aes(x = k, y = wss)) +
+  geom_line() +
+  scale_x_continuous(breaks = 1:10) +
+  labs(title = "Elbow Method for Choosing k")
+
+print(elbow_plot)
+#set k = 5
+final_k <- 5
+kmeans_result <- kmeans(scaled_data, centers = final_k, nstart = 10)
+streamer_data$cluster <- kmeans_result$cluster
+cluster_summary <- streamer_data %>% 
+  group_by(cluster) %>% 
+  summarise_all(mean)
+
+# visualize the clusters
+fviz_cluster(kmeans_result, data = scaled_data)
+cluster_assignments <- kmeans_result$cluster
+
+#Evaliation matrix
+silhouette_values <- silhouette(cluster_assignments, dist(scaled_data))
+mean_silhouette_width <- mean(silhouette_values[, 3])
+calinski_harabasz_score <- cluster.stats(dist(scaled_data), cluster_assignments)$ch
+davies_bouldin_score <- cluster.stats(dist(scaled_data), cluster_assignments)$dunn
+cat("Silhouette Score:", mean_silhouette_width, "\n")
+cat("Calinski-Harabasz Score:", calinski_harabasz_score, "\n")
+cat("Davies-Bouldin Score:", davies_bouldin_score, "\n")
+
+### analysing cluster using K-means and focus on cluster 2
+# extract centroids
+centroids <- kmeans_result$centers
+
+# view the centroids
+print(centroids)
+
+centroids_df <- as.data.frame(centroids)
+
+apply(centroids, 2, which.max)
+
+plot(centroids, col=1:nrow(centroids), pch=8, cex=2)
+text(centroids, labels=rownames(centroids), pos=4)
+
+cluster_2_data <- streamer_data %>% filter(cluster == 2)
+cluster_2_data
+
+ggplot(cluster_2_data, aes(x = mature)) +
+  geom_bar(fill = "Orange") +
+  labs(title = "Distribution of Mature Content in Cluster 2", x = "Mature Content", y = "Count") +
+  theme_minimal()
+
+
+ggplot(cluster_2_data, aes(x = language)) +
+  geom_bar(fill = "Green") +
+  labs(title = "Distribution of Language in Cluster 2", x = "Language", y = "Count") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))  # Rotate x labels for readability
+
+ggplot(cluster_2_data, aes(x = peak_viewers, y = average_viewers)) +
+  geom_point() +
+  geom_smooth(method = "lm", col = "blue") +
+  labs(x = "Peak Viewers", y = "Average Viewers", title = "Relationship between Peak and Average Viewers in Cluster 2") +
+  theme_minimal()
+
+correlation <- cor(cluster_2_data$peak_viewers, cluster_2_data$average_viewers)
+print(paste("Correlation coefficient:", correlation))
+
+ggplot(cluster_2_data, aes(x = followers_gained, y = views_gained)) +
+  geom_point() +
+  geom_smooth(method = "lm", col = "blue") +
+  labs(x = "Followers Gained", y = "Views Gained", title = "Relationship between Followers Gained and Views Gained in Cluster 2") +
+  theme_minimal()
+
+
+#analyze cluster 1
+cluster_1_data <- streamer_data %>% filter(cluster == 1)
+cluster_1_data
+
+ggplot(cluster_1_data, aes(x = mature)) +
+  geom_bar(fill = "Orange") +
+  labs(title = "Distribution of Mature Content in Cluster 2", x = "Mature Content", y = "Count") +
+  theme_minimal()
+
+
+ggplot(cluster_1_data, aes(x = language)) +
+  geom_bar(fill = "Green") +
+  labs(title = "Distribution of Language in Cluster 2", x = "Language", y = "Count") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))  # Rotate x labels for readability
+
+
+ggplot(cluster_1_data, aes(x = peak_viewers, y = average_viewers)) +
+  geom_point() +
+  geom_smooth(method = "lm", col = "blue") +
+  labs(x = "Peak Viewers", y = "Average Viewers", title = "Relationship between Peak and Average Viewers in Cluster 1") +
+  theme_minimal()
+
+ggplot(cluster_1_data, aes(x = watch_time, y = average_viewers)) +
+  geom_point() +
+  geom_smooth(method = "lm",col = "blue") +
+  labs(title = "Relationship between Watch Time and Average Viewers in Cluster 1")+
+  theme_minimal()
+correlation <- cor(cluster_1_data$peak_viewers, cluster_1_data$average_viewers)
+print(paste("Correlation coefficient:", correlation))
+
+ggplot(cluster_1_data, aes(x = followers_gained, y = views_gained)) +
+  geom_point() +
+  geom_smooth(method = "lm", col = "blue") +
+  labs(x = "Followers Gained", y = "Views Gained", title = "Relationship between Followers Gained and Views Gained in Cluster 1") +
+  theme_minimal()
+correlation <- cor(cluster_1_data$followers_gained, cluster_1_data$views_gained)
+ggplot(cluster_1_data, aes(x = average_viewers, y = views_gained)) +
+  geom_point() +
+  geom_smooth(method = "lm", col = "blue") +
+  labs(x = "Followers Gained", y = "Views Gained", title = "Relationship between average_viewers and Views Gained in Cluster 1") +
+  theme_minimal()
+
+
+#cluster 3
+cluster_3_data <- streamer_data %>% filter(cluster == 3)
+cluster_3_data
+
+
+ggplot(cluster_3_data, aes(x = mature)) +
+  geom_bar(fill = "Orange") +
+  labs(title = "Distribution of Mature Content in Cluster 3", x = "Mature Content", y = "Count") +
+  theme_minimal()
+
+
+ggplot(cluster_3_data, aes(x = language)) +
+  geom_bar(fill = "Green") +
+  labs(title = "Distribution of Language in Cluster 3", x = "Language", y = "Count") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))  # Rotate x labels for readability
+
+ggplot(cluster_3_data, aes(x = peak_viewers, y = average_viewers)) +
+  geom_point() +
+  geom_smooth(method = "lm", col = "blue") +
+  labs(x = "Peak Viewers", y = "Average Viewers", title = "Relationship between Peak and Average Viewers in Cluster 3") +
+  theme_minimal()
+correlation <- cor(cluster_3_data$peak_viewers, cluster_3_data$average_viewers)
+print(paste("Correlation coefficient:", correlation))
+
+ggplot(cluster_3_data, aes(x = followers_gained, y = views_gained)) +
+  geom_point() +
+  geom_smooth(method = "lm", col = "blue") +
+  labs(x = "Followers Gained", y = "Views Gained", title = "Relationship between Followers Gained and Views Gained in Cluster 3") +
+  theme_minimal()
+ggplot(cluster_3_data, aes(x = watch_time, y = average_viewers)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  labs(title = "Relationship between Watch Time and Average Viewers in Cluster 3")
+correlation <- cor(cluster_3_data$followers_gained, cluster_3_data$views_gained)
+ggplot(cluster_3_data, aes(x = average_viewers, y = views_gained)) +
+  geom_point() +
+  geom_smooth(method = "lm", col = "blue") +
+  labs(x = "average viewers", y = "Views Gained", title = "Relationship between average_viewers and Views Gained in Cluster 3") +
+  theme_minimal()
+
+#cluster 4
+cluster_4_data <- streamer_data %>% filter(cluster == 4)
+cluster_4_data
+
+
+ggplot(cluster_4_data, aes(x = mature)) +
+  geom_bar(fill = "Orange") +
+  labs(title = "Distribution of Mature Content in Cluster 4", x = "Mature Content", y = "Count") +
+  theme_minimal()
+
+
+ggplot(cluster_4_data, aes(x = language)) +
+  geom_bar(fill = "Green") +
+  labs(title = "Distribution of Language in Cluster 4", x = "Language", y = "Count") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))  # Rotate x labels for readability
+
+ggplot(cluster_4_data, aes(x = peak_viewers, y = average_viewers)) +
+  geom_point() +
+  geom_smooth(method = "lm", col = "blue") +
+  labs(x = "Peak Viewers", y = "Average Viewers", title = "Relationship between Peak and Average Viewers in Cluster 4") +
+  theme_minimal()
+correlation <- cor(cluster_4_data$peak_viewers, cluster_4_data$average_viewers)
+print(paste("Correlation coefficient:", correlation))
+ggplot(cluster_4_data, aes(x = followers_gained, y = views_gained)) +
+  geom_point() +
+  geom_smooth(method = "lm", col = "blue") +
+  labs(x = "Followers Gained", y = "Views Gained", title = "Relationship between Followers Gained and Views Gained in Cluster 4") +
+  theme_minimal()
+correlation <- cor(cluster_4_data$followers_gained, cluster_4_data$views_gained)
+ggplot(cluster_4_data, aes(x = watch_time, y = average_viewers)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  labs(title = "Relationship between Watch Time and Average Viewers in Cluster 4")
+ggplot(cluster_4_data, aes(x = average_viewers, y = views_gained)) +
+  geom_point() +
+  geom_smooth(method = "lm", col = "blue") +
+  labs(x = "average viewers", y = "Views Gained", title = "Relationship between average_viewers and Views Gained in Cluster 4") +
+  theme_minimal()
+
+#Cluster 5
+cluster_5_data <- streamer_data %>% filter(cluster == 5)
+cluster_5_data
+
+
+ggplot(cluster_4_data, aes(x = mature)) +
+  geom_bar(fill = "Orange") +
+  labs(title = "Distribution of Mature Content in Cluster 5", x = "Mature Content", y = "Count") +
+  theme_minimal()
+
+
+ggplot(cluster_5_data, aes(x = language)) +
+  geom_bar(fill = "Green") +
+  labs(title = "Distribution of Language in Cluster 5", x = "Language", y = "Count") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))  # Rotate x labels for readability
+
+ggplot(cluster_5_data, aes(x = peak_viewers, y = average_viewers)) +
+  geom_point() +
+  geom_smooth(method = "lm", col = "blue") +
+  labs(x = "Peak Viewers", y = "Average Viewers", title = "Relationship between Peak and Average Viewers in Cluster 5") +
+  theme_minimal()
+correlation <- cor(cluster_5_data$peak_viewers, cluster_5_data$average_viewers)
+print(paste("Correlation coefficient:", correlation))
+
+ggplot(cluster_5_data, aes(x = followers_gained, y = views_gained)) +
+  geom_point() +
+  geom_smooth(method = "lm", col = "blue") +
+  labs(x = "Followers Gained", y = "Views Gained", title = "Relationship between Followers Gained and Views Gained in Cluster 5") +
+  theme_minimal()
+
+ggplot(cluster_5_data, aes(x = watch_time, y = average_viewers)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  labs(title = "Relationship between Watch Time and Average Viewers in Cluster 5")
+correlation <- cor(cluster_5_data$followers_gained, cluster_5_data$views_gained)
+ggplot(cluster_5_data, aes(x = average_viewers, y = views_gained)) +
+  geom_point() +
+  geom_smooth(method = "lm", col = "blue") +
+  labs(x = "average viewers", y = "Views Gained", title = "Relationship between average_viewers and Views Gained in Cluster 5") +
+  theme_minimal()
+
+#association rule using cluster2
+cluster_2_data <- streamer_data %>% filter(cluster == 2)
+cluster_2_data
+categorize_column <- function(data, column_name, bins) {
+  quantiles <- quantile(data[[column_name]], probs = seq(0, 1, length.out = bins + 1), na.rm = TRUE)
+  unique_quantiles <- length(unique(quantiles))
+  labels <- c('Very Low', 'Low', 'Medium', 'High', 'Very High')[1:unique_quantiles - 1]
+  data[[column_name]] <- cut(data[[column_name]], breaks = quantiles, labels = labels, include.lowest = TRUE)
+  return(data)
+}
+
+bins <- 5
+columns_to_categorize <- c('watch_time', 'followers','views_gained')
+
+for (column in columns_to_categorize) {
+  cluster_2_data <- categorize_column(cluster_2_data, column, bins)
+}
+
+columns_for_analysis <- c(columns_to_categorize,'language','mature')
+
+cluster_2_data_selected <- cluster_2_data[columns_for_analysis]
+
+cluster_2_data_trans <- as(cluster_2_data_selected, "transactions")
+
+rules_c2 <- apriori(cluster_2_data_trans, parameter = list(supp = 0.05, conf = 0.6))
+
+inspect(head(sort(rules_c2, by = "lift"), n = 10))
+
+#apply arule on clutser 4, but we did not find useful information
+cluster_4_data <- streamer_data %>% filter(cluster == 4)
+cluster_4_data
+categorize_column <- function(data, column_name, bins) {
+  quantiles <- quantile(data[[column_name]], probs = seq(0, 1, length.out = bins + 1), na.rm = TRUE)
+  unique_quantiles <- length(unique(quantiles))
+  labels <- c('Very Low', 'Low', 'Medium', 'High', 'Very High')[1:unique_quantiles - 1]
+  data[[column_name]] <- cut(data[[column_name]], breaks = quantiles, labels = labels, include.lowest = TRUE)
+  return(data)
+}
+
+bins <- 5
+columns_to_categorize <- c('watch_time', 'followers','views_gained')
+
+for (column in columns_to_categorize) {
+  cluster_4_data <- categorize_column(cluster_4_data, column, bins)
+}
+
+
+columns_for_analysis <- c(columns_to_categorize,'language','mature')
+
+cluster_4_data_selected <- cluster_4_data[columns_for_analysis]
+
+cluster_4_data_trans <- as(cluster_4_data_selected, "transactions")
+
+rules_c4 <- apriori(cluster_4_data_trans, parameter = list(supp = 0.05, conf = 0.6))
+
+
+inspect(head(sort(rules_c4, by = "lift"), n = 10))
+```
+```{r}
+#using db scan
+dbscan_result = dbscan(scaled_data, eps = 0.5)  
+fviz_cluster(list(data = scaled_data, cluster = dbscan_result$cluster))
+cluster_assignments <- dbscan_result$cluster
+valid_clusters <- scaled_data[cluster_assignments != 0, ]
+valid_assignments <- cluster_assignments[cluster_assignments != 0]
+
+silhouette_values <- silhouette(valid_assignments, dist(valid_clusters))
+mean_silhouette_width <- mean(silhouette_values[, 3])
+calinski_harabasz_score <- cluster.stats(dist(scaled_data), cluster_assignments)$ch
+davies_bouldin_score <- cluster.stats(dist(scaled_data), cluster_assignments)$dunn
+cat("Silhouette Score:", mean_silhouette_width, "\n")
+cat("Calinski-Harabasz Score:", calinski_harabasz_score, "\n")
+cat("Davies-Bouldin Score:", davies_bouldin_score, "\n")
+```
+
+
+```{r}
+### hierarchical clustering: wards method
+dist_matrix <- dist(scaled_data)
+hc <- hclust(dist_matrix, method = "ward.D2")
+cluster_assignments <- cutree(hc, k = 5)
+plot(hc, cex = 0.6, hang = -1)  
+rect.hclust(hc, k = 5, border = 2:6) 
+fviz_cluster(list(data = scaled_data, cluster = cluster_assignments))
+
+silhouette_values <- silhouette(cluster_assignments, dist(scaled_data))
+mean_silhouette_width <- mean(silhouette_values[, 3])
+calinski_harabasz_score <- cluster.stats(dist(scaled_data), cluster_assignments)$ch
+davies_bouldin_score <- cluster.stats(dist(scaled_data), cluster_assignments)$dunn
+cat("Silhouette Score:", mean_silhouette_width, "\n")
+cat("Calinski-Harabasz Score:", calinski_harabasz_score, "\n")
+cat("Davies-Bouldin Score:", davies_bouldin_score, "\n")
+```
+
+
+```{r}
+### GMM
+gmm_result <- Mclust(scaled_data)
+gmm_result <- Mclust(scaled_data, G = 5)#set number of cluster to 5
+cluster_assignments_gmm <- gmm_result$classification
+summary(gmm_result)
+fviz_cluster(list(data = scaled_data, cluster = cluster_assignments_gmm))
+
+silhouette_values <- silhouette(cluster_assignments_gmm, dist(scaled_data))
+mean_silhouette_width <- mean(silhouette_values[, 3])
+calinski_harabasz_score <- cluster.stats(dist(scaled_data), cluster_assignments_gmm)$ch
+davies_bouldin_score <- cluster.stats(dist(scaled_data), cluster_assignments_gmm)$dunn
+cat("Silhouette Score:", mean_silhouette_width, "\n")
+cat("Calinski-Harabasz Score:", calinski_harabasz_score, "\n")
+cat("Davies-Bouldin Score:", davies_bouldin_score, "\n")
+```
+
+```{r}
+#association rule using whole data
+
+streamer_data_arule <- df_new
+#convert the numerical varaible into categorical variable, cut the value into 5 levels
+categorize_column <- function(data, column_name, bins) {
+  quantiles <- quantile(data[[column_name]], probs = seq(0, 1, length.out = bins + 1), na.rm = TRUE)
+  unique_quantiles <- length(unique(quantiles))
+  labels <- c('Very Low', 'Low', 'Medium', 'High', 'Very High')[1:unique_quantiles - 1]
+  data[[column_name]] <- cut(data[[column_name]], breaks = quantiles, labels = labels, include.lowest = TRUE)
+  return(data)
+}
+bins <- 5
+#using 'watch_time', 'followers','views_gained' three variables
+columns_to_categorize <- c('watch_time', 'followers','views_gained')
+for (column in columns_to_categorize) {
+ streamer_data_arule <- categorize_column(streamer_data_arule, column, bins)
+}
+columns_for_analysis <- c(columns_to_categorize,'language','mature')
+streamer_data_selected <- streamer_data_arule[columns_for_analysis]
+streamer_data_trans <- as(streamer_data_selected, "transactions")
+#apply apriori algorithm
+rules <- apriori(streamer_data_trans, parameter = list(supp = 0.05, conf = 0.6))
+inspect(head(sort(rules, by = "lift"), n = 10))
+```
