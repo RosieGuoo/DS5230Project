@@ -18,6 +18,8 @@ library(FactoMineR)
 library(factoextra)
 library(MASS)
 library(arules)
+library(cluster)
+library(fpc)
 ```
 
 ```{r}
